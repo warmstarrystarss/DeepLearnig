@@ -1,0 +1,223 @@
+import os
+import sys
+import json
+import time
+import torch
+import torch.nn as nn
+from matplotlib import pyplot as plt
+from torchvision import transforms, datasets
+import torch.optim as optim
+from tqdm import tqdm
+
+from model import AlexNet
+
+
+def main():
+    dataset_root = '/home/wn/data/mso.3/tp'
+
+    json_root ='./class_indices.json'
+    model_name = "alexnet"
+    net = AlexNet(num_classes=168)
+    print(net)
+
+    device = torch.device("cuda:1" if torch.cuda.is_available() else "cpu")
+
+    net.to(device)
+    print("using {} device.".format(device))
+    batch_size = 64
+    nw = min([os.cpu_count(), batch_size if batch_size > 1 else 0, 8])  # number of workers
+    print('Using {} dataloader workers every process'.format(nw))
+
+    data_transform = {
+        "train": transforms.Compose([transforms.Grayscale(1),
+                                     transforms.Resize(256),  # 不改变长宽比，最小变长转换为256
+                                     transforms.RandomResizedCrop(224),  # 按照中心裁剪
+
+                                     # transforms.RandomVerticalFlip(),
+                                     # transforms.RandomRotation(35),
+                                     # transforms.ColorJitter(brightness=0.5, contrast=0.5, saturation=0.5, hue=0.5),
+
+                                     transforms.ToTensor(),
+                                     transforms.Normalize([0.5, ], [0.5, ])]),  # 来自官网
+        "val": transforms.Compose([transforms.Grayscale(1),
+                                   transforms.Resize(256),  # 不改变长宽比，最小变长转换为256
+                                   transforms.CenterCrop(224),  # 按照中心裁剪
+
+                                   # transforms.RandomVerticalFlip(),
+                                   # transforms.RandomRotation(35),
+                                   # transforms.ColorJitter(brightness=0.5, contrast=0.5, saturation=0.5, hue=0.5),
+
+                                   transforms.ToTensor(),
+                                   transforms.Normalize([0.5, ], [0.5, ])])}
+
+
+    train_dataset = datasets.ImageFolder(root=os.path.join(dataset_root, "train"), transform=data_transform["train"])
+    validate_dataset = datasets.ImageFolder(root=os.path.join(dataset_root, "val"), transform=data_transform["val"])
+    train_num = len(train_dataset)
+    val_num = len(validate_dataset)
+
+
+    cla_dict = dict((val, key) for key, val in train_dataset.class_to_idx.items())
+    json_str = json.dumps(cla_dict, indent=3)
+    with open(json_root, 'w', encoding='utf-8') as json_file:
+        json_file.write(json_str)
+
+
+
+
+
+
+    train_loader = torch.utils.data.DataLoader(train_dataset,
+                                               batch_size=batch_size,
+                                               shuffle=True,
+                                               num_workers=nw)
+
+    validate_loader = torch.utils.data.DataLoader(validate_dataset,
+                                                  batch_size=batch_size,
+                                                  shuffle=False,
+                                                  num_workers=nw)
+    print("using {} images for training, {} images for validation.".format(train_num, val_num))
+
+
+
+
+
+    loss_function = nn.CrossEntropyLoss()
+    optimizer = optim.Adam(net.parameters(), lr=0.0001)
+
+    epochs = 200
+    best_acc = 0.0
+    # x = []
+    # y1 = []
+    # y2 = []
+
+    train_losses = []
+    val_losses = []
+    train_accs = []
+    val_accs = []
+
+    time_start = time.time()  # 记录开始时间
+    save_path = './{}Net.pth'.format(model_name)
+    train_steps = len(train_loader)
+    val_steps = len(validate_loader)
+    for epoch in range(epochs):
+
+        trian_start_time = time.time()
+        # train
+        net.train()
+        running_loss = 0.0
+        train_acc = 0.0  # accumulate accurate number / epoch
+        train_bar = tqdm(train_loader, file=sys.stdout)
+        for step, data in enumerate(train_bar):
+            images, labels = data
+            optimizer.zero_grad()
+            outputs = net(images.to(device))
+            loss = loss_function(outputs, labels.to(device))
+            loss.backward()
+            optimizer.step()
+
+            # print statistics
+            running_loss += loss.item()
+
+            # calculate training accuracy
+            predict_y = torch.max(outputs, dim=1)[1]
+            train_acc += torch.eq(predict_y, labels.to(device)).sum().item()
+
+            train_bar.desc = "train epoch[{}/{}] loss:{:.3f} acc:{:.3f}".format(epoch + 1,
+                                                                                epochs,
+                                                                                loss,
+                                                                                train_acc / train_num)
+            train_end_time = time.time()
+            train_time = train_end_time - trian_start_time
+
+            train_time += train_time
+
+        # validate
+        net.eval()
+        val_loss = 0.0
+        acc = 0.0  # accumulate accurate number / epoch
+        with torch.no_grad():
+
+            val_start_time = time.time()
+
+            val_bar = tqdm(validate_loader, file=sys.stdout)
+            for val_data in val_bar:
+                val_images, val_labels = val_data
+                outputs = net(val_images.to(device))
+                loss = loss_function(outputs, val_labels.to(device))
+                val_loss += loss.item()
+
+                predict_y = torch.max(outputs, dim=1)[1]
+                acc += torch.eq(predict_y, val_labels.to(device)).sum().item()
+
+        val_accurate = acc / val_num
+
+        val_end_time = time.time()
+        val_time = val_end_time - val_start_time
+        val_time += val_time
+
+        print('[epoch %d] train_loss: %.3f  train_acc: %.3f  val_loss: %.3f  val_accuracy: %.3f' %
+              (epoch + 1, running_loss / train_steps, train_acc / train_num, val_loss / val_steps, val_accurate))
+        # x.append(epoch + 1)
+        # y1.append(running_loss / train_steps)
+        # y2.append(val_accurate)
+
+        train_losses.append(running_loss / train_steps)
+
+        train_accs.append(train_acc / train_num)
+
+        # calculate validation loss and store
+        val_losses.append(val_loss / val_steps)
+
+        # calculate validation accuracy and store
+        val_accs.append(val_accurate)
+
+        if val_accurate > best_acc:
+            best_acc = val_accurate
+            torch.save(net.state_dict(), save_path)
+
+    print('Finished Training')
+    time_end = time.time()  # 记录结束时间
+    time_sum = time_end - time_start  # 计算的时间差为程序的执行时间，单位为秒/s
+    print('代码运行时间 {:.0f}分 {:.0f}秒'.format(time_sum // 60, time_sum % 60))
+    print("train.time:{:.2f}s".format(train_time))
+    print("val.time:{:.2f}s".format(val_time))
+    # fig, axs = plt.subplots(nrows=1, ncols=2, figsize=(20, 6), dpi=100)
+    #  y_data = [y1, y2]
+    #  colors = ['red', 'blue']
+    #  line_style = ['-', '--']
+    #  y_labels = ["train_loss", "val_accurate"]
+    #  for i in range(2):
+    #      axs[i].plot(x, y_data[i], c=colors[i], label=y_labels[i], linestyle=line_style[i])
+    #      axs[i].scatter(x, y_data[i], c=colors[i])
+    #      axs[i].grid(True, linestyle='--', alpha=0.5)
+    #      axs[i].set_xlabel(y_labels[i], fontdict={'size': 16}, rotation=0)
+    #  fig.autofmt_xdate()
+    #  plt.savefig("./vgg19_train_loss.jpg")
+    #  plt.show()
+
+    #    Plot loss curve
+    plt.figure(figsize=(10, 5))
+    plt.plot(range(1, epochs + 1), train_losses, label='train loss')
+    plt.plot(range(1, epochs + 1), val_losses, label='val loss')
+    plt.xlabel('Epochs')
+    plt.ylabel('Loss')
+    plt.title('Training and Validation Loss AlexNet')
+    plt.legend()
+    plt.savefig("./Alexnet_loss_mso.1.jpg")
+    plt.show()
+
+    # Plot accuracy curve
+    plt.figure(figsize=(10, 5))
+    plt.plot(range(1, epochs + 1), train_accs, label='train accuracy')
+    plt.plot(range(1, epochs + 1), val_accs, label='val accuracy')
+    plt.xlabel('Epochs')
+    plt.ylabel('Accuracy')
+    plt.title('Training and Validation Accuracy Alexnet')
+    plt.legend()
+    plt.savefig("./Alexnet_acc_mso.1.jpg")
+    plt.show()
+
+
+if __name__ == '__main__':
+    main()
